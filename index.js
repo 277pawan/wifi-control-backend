@@ -23,13 +23,14 @@ const connectedLaptops = new Map();
 
 app.use(
   cors({
-    origin: "*",
+    origin: [
+      "http://localhost:5173",
+      "https://wifi-control-frontend.vercel.app",
+    ],
     methods: ["GET", "POST"],
     credentials: true,
   }),
-);
-
-// Middleware to check API key
+); // Middleware to check API key
 const checkApiKey = (req, res, next) => {
   const apiKey = req.headers["x-api-key"];
   if (!apiKey || apiKey !== process.env.API_KEY) {
