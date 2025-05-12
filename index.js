@@ -38,7 +38,11 @@ app.use(
 // Middleware to check API key
 const checkApiKey = (req, res, next) => {
   const apiKey = req.headers["x-api-key"];
+  console.log("API Key received:", apiKey); // Detailed logging
+  console.log("Expected API Key:", process.env.API_KEY); // Log expected key
+
   if (!apiKey || apiKey !== process.env.API_KEY) {
+    console.log("API Key validation failed"); // Logging
     return res.status(401).json({ success: false, message: "Unauthorized" });
   }
   next();
@@ -56,46 +60,15 @@ app.get("/api/laptops", (req, res) => {
   res.json({ status: true, laptops: laptopList });
 });
 
-// API endpoint to turn off wifi
-app.post("/api/control/wifi/off", checkApiKey, (req, res) => {
-  const { laptopId, type } = req.body;
-
-  if (!laptopId) {
-    return res
-      .status(400)
-      .json({ status: false, message: "Laptop ID is required" });
-  }
-
-  const laptop = connectedLaptops.get(laptopId);
-  if (!laptop) {
-    return res
-      .status(404)
-      .json({ success: false, message: "Laptop not found or not connected" });
-  }
-
-  const requestId = Date.now().toString();
-  laptop.pendingRequests.set(requestId, { res, timestamp: Date.now() });
-
-  // Timeout handling
-  setTimeout(() => {
-    const pending = laptop.pendingRequests.get(requestId);
-    if (pending) {
-      laptop.pendingRequests.delete(requestId);
-      pending.res
-        .status(408)
-        .json({ status: false, message: "Request timed out" });
-    }
-  }, 30000);
-
-  // Emit only once with requestId
-  io.to(laptopId).emit("command", { type: type, requestId });
-});
-
 // API endpoint to execute command
 app.post("/api/control/execute", checkApiKey, (req, res) => {
   const { laptopId, command } = req.body;
 
+  console.log("Received execute request:", { laptopId, command }); // Enhanced logging
+  console.log("Connected Laptops:", Array.from(connectedLaptops.keys())); // Log connected laptop IDs
+
   if (!laptopId || !command) {
+    console.log("Missing laptopId or command"); // Logging
     return res
       .status(400)
       .json({ success: false, message: "Laptop ID and command are required" });
@@ -103,6 +76,7 @@ app.post("/api/control/execute", checkApiKey, (req, res) => {
 
   const laptop = connectedLaptops.get(laptopId);
   if (!laptop) {
+    console.log(`Laptop ${laptopId} not found or not connected`); // Logging
     return res
       .status(404)
       .json({ success: false, message: "Laptop not found or not connected" });
@@ -124,7 +98,12 @@ app.post("/api/control/execute", checkApiKey, (req, res) => {
   }, 500000);
 
   // Send command to the specific laptop
-  io.to(laptopId).emit("command", { type: "execute", command, requestId });
+  console.log(`Emitting command to laptop ${laptopId}`); // Logging
+  io.to(laptopId).emit("command", {
+    type: "execute",
+    command,
+    requestId,
+  });
 });
 
 // Socket.IO connection handling
@@ -134,6 +113,9 @@ io.on("connection", (socket) => {
   // Handle laptop registration
   socket.on("register", (data) => {
     const { name, secret } = data;
+
+    console.log("Registration attempt:", { name, secret }); // Logging
+    console.log("Expected secret:", process.env.LAPTOP_SECRET); // Logging
 
     // Verify registration secret (simple authentication)
     if (secret !== process.env.LAPTOP_SECRET) {
@@ -156,199 +138,20 @@ io.on("connection", (socket) => {
     socket.emit("registered", { id: socket.id });
   });
 
-  // In your server-side socket event handlers
+  socket.on("commandResponse", (data) => {
+    const { requestId, success, message, output } = data;
+    console.log("Received command response:", data); // Logging
 
-  // Server-side socket event handlers
-  const connectedLaptops = new Map();
-
-  socket.on("largeFileTransmissionStart", (metadata) => {
-    const { requestId } = metadata;
     const laptop = connectedLaptops.get(socket.id);
 
-    if (laptop) {
-      // Initialize transmission state
-      laptop.transmissions = laptop.transmissions || {};
-      laptop.transmissions[requestId] = {
-        ...metadata,
-        chunks: new Array(metadata.totalChunks).fill(null),
-        receivedChunks: 0,
-        startTime: Date.now(),
-      };
-
-      debugLog(`Large file transmission started:`, metadata);
-    }
-  });
-
-  socket.on("largeFileChunk", (chunkData) => {
-    const { requestId, chunkIndex, totalChunks, data } = chunkData;
-    const laptop = connectedLaptops.get(socket.id);
-
-    if (laptop && laptop.transmissions && laptop.transmissions[requestId]) {
-      const transmission = laptop.transmissions[requestId];
-
-      // Check if chunk already received
-      if (transmission.chunks[chunkIndex] === null) {
-        transmission.chunks[chunkIndex] = data;
-        transmission.receivedChunks++;
-
-        // Acknowledge chunk receipt
-        socket.emit(`chunkAcknowledged_${requestId}_${chunkIndex}`, {
-          requestId,
-          chunkIndex,
-          receivedAt: Date.now(),
-          chunkSize: data.length,
-        });
-
-        debugLog(`Received chunk ${chunkIndex + 1}/${totalChunks}`, {
-          receivedChunks: transmission.receivedChunks,
-        });
-      }
-    }
-  });
-
-  socket.on("largeFileTransmissionEnd", (endMetadata) => {
-    const { requestId, sentChunks, totalChunks, failedChunks, duration } =
-      endMetadata;
-    const laptop = connectedLaptops.get(socket.id);
-
-    if (laptop && laptop.transmissions && laptop.transmissions[requestId]) {
-      const transmission = laptop.transmissions[requestId];
-
-      // Check if all chunks received
-      const completeChunks = transmission.chunks.filter(
-        (chunk) => chunk !== null,
-      );
-
-      if (completeChunks.length === totalChunks) {
-        const completeData = completeChunks.join("");
-
-        // Respond with successful transmission
-        const pendingRequest = laptop.pendingRequests.get(requestId);
-        if (pendingRequest) {
-          pendingRequest.res.json({
-            success: true,
-            message: `File received successfully (${completeChunks.length} chunks)`,
-            output: {
-              base64: completeData,
-              originalFilepath: transmission.filepath,
-              transmissionTime: duration,
-            },
-          });
-        }
-      } else {
-        // Partial or failed transmission
-        const pendingRequest = laptop.pendingRequests.get(requestId);
-        if (pendingRequest) {
-          pendingRequest.res.status(500).json({
-            success: false,
-            message: `Incomplete file transfer. Received ${completeChunks.length}/${totalChunks} chunks`,
-            failedChunks,
-          });
-        }
-      }
-
-      // Clean up transmission state
-      delete laptop.transmissions[requestId];
+    if (laptop && laptop.pendingRequests.has(requestId)) {
+      const { res } = laptop.pendingRequests.get(requestId);
       laptop.pendingRequests.delete(requestId);
-    }
-  });
 
-  socket.on("commandResponseStart", (data) => {
-    const { requestId } = data;
-    const laptop = connectedLaptops.get(socket.id);
-
-    if (laptop && laptop.pendingRequests.has(requestId)) {
-      const pendingRequest = laptop.pendingRequests.get(requestId);
-      pendingRequest.chunks = new Array(data.totalChunks).fill(null);
-      pendingRequest.receivedChunks = 0;
-      pendingRequest.totalChunks = data.totalChunks;
-      pendingRequest.filepath = data.filepath;
-      pendingRequest.checksum = data.checksum;
-      pendingRequest.startTime = Date.now();
-    }
-  });
-
-  socket.on("commandResponseChunk", (data) => {
-    const {
-      requestId,
-      chunkIndex,
-      data: chunkData,
-      transmissionMetadata,
-    } = data;
-    const laptop = connectedLaptops.get(socket.id);
-
-    if (laptop && laptop.pendingRequests.has(requestId)) {
-      const pendingRequest = laptop.pendingRequests.get(requestId);
-
-      // Check if chunk already received
-      if (pendingRequest.chunks[chunkIndex] === null) {
-        pendingRequest.chunks[chunkIndex] = chunkData;
-        pendingRequest.receivedChunks++;
-
-        // Acknowledge chunk receipt with timing info
-        socket.emit(`chunkAcknowledged_${requestId}_${chunkIndex}`, {
-          receivedAt: Date.now(),
-          chunkSize: chunkData.length,
-          ...transmissionMetadata,
-        });
-
-        // Log chunk receipt
-        console.log(
-          `Received chunk ${chunkIndex + 1}/${pendingRequest.totalChunks}`,
-        );
-      }
-    }
-  });
-
-  socket.on("commandResponseEnd", (data) => {
-    const { requestId, sentChunks } = data;
-    const laptop = connectedLaptops.get(socket.id);
-
-    if (laptop && laptop.pendingRequests.has(requestId)) {
-      const pendingRequest = laptop.pendingRequests.get(requestId);
-
-      // Check if all chunks received
-      const completeChunks = pendingRequest.chunks.filter(
-        (chunk) => chunk !== null,
-      );
-
-      if (completeChunks.length === pendingRequest.totalChunks) {
-        const completeData = completeChunks.join("");
-
-        pendingRequest.res.json({
-          success: true,
-          message: `Screenshot received successfully (${completeChunks.length} chunks)`,
-          output: {
-            base64: completeData,
-            originalFilepath: pendingRequest.filepath,
-            transmissionTime: Date.now() - pendingRequest.startTime,
-          },
-        });
-      } else {
-        pendingRequest.res.status(500).json({
-          success: false,
-          message: `Incomplete screenshot data. Received ${completeChunks.length}/${pendingRequest.totalChunks} chunks`,
-        });
-      }
-
-      laptop.pendingRequests.delete(requestId);
-    }
-  });
-
-  socket.on("commandResponseError", (data) => {
-    const { requestId, message, failedChunks } = data;
-    const laptop = connectedLaptops.get(socket.id);
-
-    if (laptop && laptop.pendingRequests.has(requestId)) {
-      const pendingRequest = laptop.pendingRequests.get(requestId);
-
-      pendingRequest.res.status(500).json({
-        success: false,
-        message: message || "Error during screenshot transmission",
-        failedChunks: failedChunks || [],
-      });
-
-      laptop.pendingRequests.delete(requestId);
+      // Send the response back to the original request
+      res.json({ success, message, output });
+    } else {
+      console.log("No matching pending request found"); // Logging
     }
   });
 
