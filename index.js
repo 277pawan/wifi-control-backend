@@ -117,7 +117,7 @@ app.post("/api/control/execute", checkApiKey, (req, res) => {
         .status(408)
         .json({ success: false, message: "Request timed out" });
     }
-  }, 10000); // 10 second timeout
+  }, 30000); // 10 second timeout
 
   // Send command to the specific laptop
   io.to(laptopId).emit("command", { type: "execute", command, requestId });
