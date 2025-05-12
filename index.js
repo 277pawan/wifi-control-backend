@@ -157,6 +157,10 @@ io.on("connection", (socket) => {
   });
 
   // In your server-side socket event handlers
+
+  // Server-side socket event handlers
+  const connectedLaptops = new Map();
+
   socket.on("largeFileTransmissionStart", (metadata) => {
     const { requestId } = metadata;
     const laptop = connectedLaptops.get(socket.id);
@@ -245,6 +249,105 @@ io.on("connection", (socket) => {
 
       // Clean up transmission state
       delete laptop.transmissions[requestId];
+      laptop.pendingRequests.delete(requestId);
+    }
+  });
+
+  socket.on("commandResponseStart", (data) => {
+    const { requestId } = data;
+    const laptop = connectedLaptops.get(socket.id);
+
+    if (laptop && laptop.pendingRequests.has(requestId)) {
+      const pendingRequest = laptop.pendingRequests.get(requestId);
+      pendingRequest.chunks = new Array(data.totalChunks).fill(null);
+      pendingRequest.receivedChunks = 0;
+      pendingRequest.totalChunks = data.totalChunks;
+      pendingRequest.filepath = data.filepath;
+      pendingRequest.checksum = data.checksum;
+      pendingRequest.startTime = Date.now();
+    }
+  });
+
+  socket.on("commandResponseChunk", (data) => {
+    const {
+      requestId,
+      chunkIndex,
+      data: chunkData,
+      transmissionMetadata,
+    } = data;
+    const laptop = connectedLaptops.get(socket.id);
+
+    if (laptop && laptop.pendingRequests.has(requestId)) {
+      const pendingRequest = laptop.pendingRequests.get(requestId);
+
+      // Check if chunk already received
+      if (pendingRequest.chunks[chunkIndex] === null) {
+        pendingRequest.chunks[chunkIndex] = chunkData;
+        pendingRequest.receivedChunks++;
+
+        // Acknowledge chunk receipt with timing info
+        socket.emit(`chunkAcknowledged_${requestId}_${chunkIndex}`, {
+          receivedAt: Date.now(),
+          chunkSize: chunkData.length,
+          ...transmissionMetadata,
+        });
+
+        // Log chunk receipt
+        console.log(
+          `Received chunk ${chunkIndex + 1}/${pendingRequest.totalChunks}`,
+        );
+      }
+    }
+  });
+
+  socket.on("commandResponseEnd", (data) => {
+    const { requestId, sentChunks } = data;
+    const laptop = connectedLaptops.get(socket.id);
+
+    if (laptop && laptop.pendingRequests.has(requestId)) {
+      const pendingRequest = laptop.pendingRequests.get(requestId);
+
+      // Check if all chunks received
+      const completeChunks = pendingRequest.chunks.filter(
+        (chunk) => chunk !== null,
+      );
+
+      if (completeChunks.length === pendingRequest.totalChunks) {
+        const completeData = completeChunks.join("");
+
+        pendingRequest.res.json({
+          success: true,
+          message: `Screenshot received successfully (${completeChunks.length} chunks)`,
+          output: {
+            base64: completeData,
+            originalFilepath: pendingRequest.filepath,
+            transmissionTime: Date.now() - pendingRequest.startTime,
+          },
+        });
+      } else {
+        pendingRequest.res.status(500).json({
+          success: false,
+          message: `Incomplete screenshot data. Received ${completeChunks.length}/${pendingRequest.totalChunks} chunks`,
+        });
+      }
+
+      laptop.pendingRequests.delete(requestId);
+    }
+  });
+
+  socket.on("commandResponseError", (data) => {
+    const { requestId, message, failedChunks } = data;
+    const laptop = connectedLaptops.get(socket.id);
+
+    if (laptop && laptop.pendingRequests.has(requestId)) {
+      const pendingRequest = laptop.pendingRequests.get(requestId);
+
+      pendingRequest.res.status(500).json({
+        success: false,
+        message: message || "Error during screenshot transmission",
+        failedChunks: failedChunks || [],
+      });
+
       laptop.pendingRequests.delete(requestId);
     }
   });
