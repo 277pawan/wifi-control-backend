@@ -3,8 +3,6 @@ import cors from "cors";
 import dotenv from "dotenv";
 import http from "http";
 import { Server } from "socket.io";
-import fs from "fs";
-import path from "path";
 
 dotenv.config();
 const app = express();
@@ -158,39 +156,96 @@ io.on("connection", (socket) => {
     socket.emit("registered", { id: socket.id });
   });
 
-  // Handle command responses with improved large payload handling
-  socket.on("commandResponse", (data) => {
-    console.log(data);
-    const { requestId, success, message, output } = data;
+  // In your server-side socket event handlers
+  socket.on("largeFileTransmissionStart", (metadata) => {
+    const { requestId } = metadata;
     const laptop = connectedLaptops.get(socket.id);
 
-    if (laptop && laptop.pendingRequests.has(requestId)) {
-      const { res } = laptop.pendingRequests.get(requestId);
-      laptop.pendingRequests.delete(requestId);
+    if (laptop) {
+      // Initialize transmission state
+      laptop.transmissions = laptop.transmissions || {};
+      laptop.transmissions[requestId] = {
+        ...metadata,
+        chunks: new Array(metadata.totalChunks).fill(null),
+        receivedChunks: 0,
+        startTime: Date.now(),
+      };
 
-      // Handle screenshot with base64 data
-      if (output && typeof output === "object" && output.base64) {
-        try {
-          res.json({
-            success,
-            message,
+      debugLog(`Large file transmission started:`, metadata);
+    }
+  });
+
+  socket.on("largeFileChunk", (chunkData) => {
+    const { requestId, chunkIndex, totalChunks, data } = chunkData;
+    const laptop = connectedLaptops.get(socket.id);
+
+    if (laptop && laptop.transmissions && laptop.transmissions[requestId]) {
+      const transmission = laptop.transmissions[requestId];
+
+      // Check if chunk already received
+      if (transmission.chunks[chunkIndex] === null) {
+        transmission.chunks[chunkIndex] = data;
+        transmission.receivedChunks++;
+
+        // Acknowledge chunk receipt
+        socket.emit(`chunkAcknowledged_${requestId}_${chunkIndex}`, {
+          requestId,
+          chunkIndex,
+          receivedAt: Date.now(),
+          chunkSize: data.length,
+        });
+
+        debugLog(`Received chunk ${chunkIndex + 1}/${totalChunks}`, {
+          receivedChunks: transmission.receivedChunks,
+        });
+      }
+    }
+  });
+
+  socket.on("largeFileTransmissionEnd", (endMetadata) => {
+    const { requestId, sentChunks, totalChunks, failedChunks, duration } =
+      endMetadata;
+    const laptop = connectedLaptops.get(socket.id);
+
+    if (laptop && laptop.transmissions && laptop.transmissions[requestId]) {
+      const transmission = laptop.transmissions[requestId];
+
+      // Check if all chunks received
+      const completeChunks = transmission.chunks.filter(
+        (chunk) => chunk !== null,
+      );
+
+      if (completeChunks.length === totalChunks) {
+        const completeData = completeChunks.join("");
+
+        // Respond with successful transmission
+        const pendingRequest = laptop.pendingRequests.get(requestId);
+        if (pendingRequest) {
+          pendingRequest.res.json({
+            success: true,
+            message: `File received successfully (${completeChunks.length} chunks)`,
             output: {
-              base64: output.base64,
-              originalFilepath: output.filepath,
+              base64: completeData,
+              originalFilepath: transmission.filepath,
+              transmissionTime: duration,
             },
-          });
-        } catch (error) {
-          console.error("Error saving screenshot:", error);
-          res.json({
-            success: false,
-            message: "Error processing screenshot",
-            error: error.message,
           });
         }
       } else {
-        // Regular response handling
-        res.json({ success, message, output });
+        // Partial or failed transmission
+        const pendingRequest = laptop.pendingRequests.get(requestId);
+        if (pendingRequest) {
+          pendingRequest.res.status(500).json({
+            success: false,
+            message: `Incomplete file transfer. Received ${completeChunks.length}/${totalChunks} chunks`,
+            failedChunks,
+          });
+        }
       }
+
+      // Clean up transmission state
+      delete laptop.transmissions[requestId];
+      laptop.pendingRequests.delete(requestId);
     }
   });
 
@@ -210,17 +265,6 @@ io.on("connection", (socket) => {
     }
 
     connectedLaptops.delete(socket.id);
-  });
-  socket.on("keep-alive", (data) => {
-    debugLog("Received keep-alive message for request:", data.requestId);
-    // Reset timeout for the request
-    const laptop = connectedLaptops.get(socket.id);
-    if (laptop && laptop.pendingRequests.has(data.requestId)) {
-      const pendingRequest = laptop.pendingRequests.get(data.requestId);
-      pendingRequest.timeout = setTimeout(() => {
-        // Handle timeout
-      }, 10000000);
-    }
   });
 });
 
