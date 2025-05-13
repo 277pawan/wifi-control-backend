@@ -60,6 +60,42 @@ app.get("/api/laptops", (req, res) => {
   res.json({ status: true, laptops: laptopList });
 });
 
+// API endpoint to turn off wifi
+app.post("/api/control/wifi/off", checkApiKey, (req, res) => {
+  const { laptopId, type } = req.body;
+
+  if (!laptopId) {
+    return res
+      .status(400)
+      .json({ status: false, message: "Laptop ID is required" });
+  }
+
+  const laptop = connectedLaptops.get(laptopId);
+  if (!laptop) {
+    return res
+      .status(404)
+      .json({ success: false, message: "Laptop not found or not connected" });
+  }
+
+  const requestId = Date.now().toString();
+  laptop.pendingRequests.set(requestId, { res, timestamp: Date.now() });
+
+  // Timeout handling
+  setTimeout(() => {
+    const pending = laptop.pendingRequests.get(requestId);
+    if (pending) {
+      laptop.pendingRequests.delete(requestId);
+      pending.res
+        .status(408)
+        .json({ status: false, message: "Request timed out" });
+    }
+  }, 30000);
+
+  console.log(type);
+  // ✅ Emit only once with requestId
+  io.to(laptopId).emit("command", { type: type, requestId });
+});
+
 // API endpoint to execute command
 app.post("/api/control/execute", checkApiKey, (req, res) => {
   const { laptopId, command } = req.body;
