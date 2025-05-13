@@ -2,7 +2,10 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import http from "http";
+import multer from "multer";
 import { Server } from "socket.io";
+import path from "path";
+import fs from "fs";
 
 dotenv.config();
 const app = express();
@@ -34,6 +37,33 @@ app.use(
     credentials: true,
   }),
 );
+
+const uploadDir = path.join(process.cwd(), "screenshots");
+if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
+
+// Configure multer
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, uploadDir);
+  },
+  filename: (req, file, cb) => {
+    const uniqueName = `screenshot-${Date.now()}${path.extname(file.originalname)}`;
+    cb(null, uniqueName);
+  },
+});
+const upload = multer({ storage });
+
+// POST /upload
+app.post("/api/upload", upload.single("file"), (req, res) => {
+  if (!req.file) {
+    return res
+      .status(400)
+      .json({ success: false, message: "No file uploaded" });
+  }
+
+  const fileUrl = `${req.protocol}://${req.get("host")}/uploads/${req.file.filename}`;
+  res.json({ success: true, url: fileUrl });
+});
 
 // Middleware to check API key
 const checkApiKey = (req, res, next) => {
