@@ -131,7 +131,6 @@ app.post("/api/control/execute", checkApiKey, (req, res) => {
   const { laptopId, command } = req.body;
 
   console.log("Received execute request:", { laptopId, command }); // Enhanced logging
-  console.log("Connected Laptops:", Array.from(connectedLaptops.keys())); // Log connected laptop IDs
 
   if (!laptopId || !command) {
     console.log("Missing laptopId or command"); // Logging
